@@ -46,20 +46,20 @@
 
 	<insert id="saveOrUpdate" parameterType="com.xxl.job.admin.model.XxlJobLogReport" useGeneratedKeys="true" keyProperty="id" >
 		INSERT INTO xxl_job_log_report (
-			`trigger_day`,
-			`running_count`,
-			`suc_count`,
-			`fail_count`
+			trigger_day,
+			running_count,
+			suc_count,
+			fail_count
 		) VALUES (
-			 #{triggerDay},
-			 #{runningCount},
-			 #{sucCount},
-			 #{failCount}
-		 )
-		ON DUPLICATE KEY UPDATE
-			`running_count` = #{runningCount},
-			`suc_count` = #{sucCount},
-			`fail_count` = #{failCount}
+					 #{triggerDay},
+					 #{runningCount},
+					 #{sucCount},
+					 #{failCount}
+				 )
+			ON CONFLICT (trigger_day) DO UPDATE SET
+			running_count = #{runningCount},
+											 suc_count = #{sucCount},
+											 fail_count = #{failCount}
 	</insert>
 
 	<select id="queryLogReport" resultMap="XxlJobLogReport">
