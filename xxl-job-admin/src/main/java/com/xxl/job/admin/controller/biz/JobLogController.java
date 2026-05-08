@@ -66,7 +66,7 @@ public class JobLogController {
 		List<XxlJobGroup> jobGroupListTotal =  xxlJobGroupMapper.findAll();
 
 		// filter JobGroupList
-		List<XxlJobGroup> jobGroupList = JobGroupPermissionUtil.filterJobGroupByPermission(request, jobGroupListTotal);
+		List<XxlJobGroup> jobGroupList = jobGroupListTotal;
 		if (CollectionTool.isEmpty(jobGroupList)) {
 			throw new XxlJobException(I18nUtil.getString("jobgroup_empty"));
 		}
@@ -124,13 +124,13 @@ public class JobLogController {
 	public Response<PageModel<XxlJobLog>> pageList(HttpServletRequest request,
 										@RequestParam(required = false, defaultValue = "0") int offset,
 										@RequestParam(required = false, defaultValue = "10") int pagesize,
-										@RequestParam int jobGroup,
-										@RequestParam int jobId,
-										@RequestParam int logStatus,
-										@RequestParam String filterTime) {
+										  int jobGroup,
+										  int jobId,
+										  int logStatus,
+										  String filterTime) {
 
 		// valid jobGroup permission
-		JobGroupPermissionUtil.validJobGroupPermission(request, jobGroup);
+//		JobGroupPermissionUtil.validJobGroupPermission(request, jobGroup);
 
 		// valid jobId
 		if (jobId < 1) {
