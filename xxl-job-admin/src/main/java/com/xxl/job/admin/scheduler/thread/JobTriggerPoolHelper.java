@@ -19,14 +19,14 @@ public class JobTriggerPoolHelper {
 
     // ---------------------- trigger pool ----------------------
 
-    // fast/slow thread pool
+    // 快慢线程池隔离设计：处理正常任务与超时任务
     private ThreadPoolExecutor fastTriggerPool = null;
     private ThreadPoolExecutor slowTriggerPool = null;
 
     /**
      * start
      */
-    public void start(){
+    public void start() {
         fastTriggerPool = new ThreadPoolExecutor(
                 10,
                 XxlJobAdminBootstrap.getInstance().getTriggerPoolFastMax(),
@@ -42,7 +42,7 @@ public class JobTriggerPoolHelper {
                 new RejectedExecutionHandler() {
                     @Override
                     public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-                        logger.error(">>>>>>>>>>> xxl-job, admin JobTriggerPoolHelper-fastTriggerPool execute too fast, Runnable="+r.toString() );
+                        logger.error(">>>>>>>>>>> xxl-job, admin JobTriggerPoolHelper-fastTriggerPool execute too fast, Runnable=" + r.toString());
                     }
                 });
 
@@ -61,7 +61,7 @@ public class JobTriggerPoolHelper {
                 new RejectedExecutionHandler() {
                     @Override
                     public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-                        logger.error(">>>>>>>>>>> xxl-job, admin JobTriggerPoolHelper-slowTriggerPool execute too fast, Runnable="+r.toString() );
+                        logger.error(">>>>>>>>>>> xxl-job, admin JobTriggerPoolHelper-slowTriggerPool execute too fast, Runnable=" + r.toString());
                     }
                 });
     }
@@ -78,7 +78,7 @@ public class JobTriggerPoolHelper {
 
 
     // job timeout count
-    private volatile long minTim = System.currentTimeMillis()/60000;     // ms > min
+    private volatile long minTim = System.currentTimeMillis() / 60000;     // ms > min
     private volatile ConcurrentMap<Integer, AtomicInteger> jobTimeoutCountMap = new ConcurrentHashMap<>();
 
 
@@ -89,13 +89,11 @@ public class JobTriggerPoolHelper {
      *
      * @param jobId
      * @param triggerType
-     * @param failRetryCount
-     * 			>=0: use this param
-     * 			<0: use param from job info config
+     * @param failRetryCount        >=0: use this param
+     *                              <0: use param from job info config
      * @param executorShardingParam
-     * @param executorParam
-     *          null: use job param
-     *          not null: cover job param
+     * @param executorParam         null: use job param
+     *                              not null: cover job param
      */
     public void trigger(final int jobId,
                         final TriggerTypeEnum triggerType,
@@ -104,10 +102,12 @@ public class JobTriggerPoolHelper {
                         final String executorParam,
                         final String addressList) {
 
-        // choose thread pool
+        // 1. 线程池选择逻辑 (隔离核心)
         ThreadPoolExecutor triggerPool_ = fastTriggerPool;
         AtomicInteger jobTimeoutCount = jobTimeoutCountMap.get(jobId);
-        if (jobTimeoutCount!=null && jobTimeoutCount.get() > 10) {      // job-timeout 10 times in 1 min
+
+        // 关键判定：若任务在 1 分钟内连续超时 (>500ms) 超过 10 次，则降级到“慢池”执行
+        if (jobTimeoutCount != null && jobTimeoutCount.get() > 10) {      // job-timeout 10 times in 1 min
             triggerPool_ = slowTriggerPool;
         }
 
@@ -125,15 +125,15 @@ public class JobTriggerPoolHelper {
                     logger.error(e.getMessage(), e);
                 } finally {
 
-                    // check timeout-count-map
-                    long minTim_now = System.currentTimeMillis()/60000;
+                    // 2. 超时统计维护：按分钟清理计数器
+                    long minTim_now = System.currentTimeMillis() / 60000;
                     if (minTim != minTim_now) {
                         minTim = minTim_now;
                         jobTimeoutCountMap.clear();
                     }
 
-                    // incr timeout-count-map
-                    long cost = System.currentTimeMillis()-start;
+                    // 耗时判定：若本次触发调用耗时超过 500ms，则计为一次超时
+                    long cost = System.currentTimeMillis() - start;
                     if (cost > 500) {       // ob-timeout threshold 500ms
                         AtomicInteger timeoutCount = jobTimeoutCountMap.putIfAbsent(jobId, new AtomicInteger(1));
                         if (timeoutCount != null) {
@@ -144,9 +144,10 @@ public class JobTriggerPoolHelper {
                 }
 
             }
+
             @Override
             public String toString() {
-                return "Job Runnable, jobId:"+jobId;
+                return "Job Runnable, jobId:" + jobId;
             }
         });
     }

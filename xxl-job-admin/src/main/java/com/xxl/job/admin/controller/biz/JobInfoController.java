@@ -163,8 +163,8 @@ public class JobInfoController {
     @ResponseBody
     public Response<String> triggerJob(HttpServletRequest request,
                                        @RequestParam("id") int id,
-                                       @RequestParam("executorParam") String executorParam,
-                                       @RequestParam("addressList") String addressList) {
+                                         String executorParam,
+                                         String addressList) {
         Response<LoginInfo> loginInfoResponse = XxlSsoHelper.loginCheckWithAttr(request);
         return xxlJobService.trigger(loginInfoResponse.getData(), id, executorParam, addressList);
     }

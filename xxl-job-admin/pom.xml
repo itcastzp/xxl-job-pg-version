@@ -80,6 +80,12 @@
 			<version>${project.parent.version}</version>
 		</dependency>
 
+<!--		&lt;!&ndash; Spring Cloud 负载均衡能力 &ndash;&gt;-->
+<!--		<dependency>-->
+<!--			<groupId>org.springframework.cloud</groupId>-->
+<!--			<artifactId>spring-cloud-starter-loadbalancer</artifactId>-->
+<!--		</dependency>-->
+
 		<!-- xxl-sso (xxl-tool、gson) -->
 		<dependency>
 			<groupId>com.xuxueli</groupId>

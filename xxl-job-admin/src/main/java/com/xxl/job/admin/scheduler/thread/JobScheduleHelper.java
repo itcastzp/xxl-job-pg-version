@@ -18,12 +18,29 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
+ *  * 一个任务的完整流程
+ *  * 1. 注册与发现 (Heartbeat)
+ *  * 执行器启动后，会定时（默认 30s）向调度中心发送“心跳”，告诉 Admin：“我还在，这是我的 IP 和端口”。
+ *  * Admin 会把这些信息存在数据库里，形成一个“动态地址列表”。
+ *  * 2. 调度触发 (Trigger)
+ *  * Admin 内部有一个定时线程池。当任务的 Cron 时间到了，Admin 会根据配置的“路由策略”（如轮询、随机、一致性 Hash）从地址列表中选出一个执行器。
+ *  * 3. 指令下发 (Dispatch)
+ *  * Admin 调用执行器的接口（/run），把任务参数、LogId、处理逻辑名称发过去。
+ *  * 4. 任务执行 (Execution)
+ *  * 执行器接收到请求后，会启动一个 JobThread 来运行业务代码。
+ *  * 注意：执行器是异步执行的，它会立刻给 Admin 返回“已收到请求”，然后慢慢跑业务逻辑。
+ *  * 5. 回报结果 (Callback)
+ *  * 业务跑完后（成功或失败），执行器会将结果放入一个“回调队列”，由专门的线程批量异步回传给 Admin 的接口（/callback）。
  * @author xuxueli 2019-05-21
  */
 public class JobScheduleHelper {
     private static final Logger logger = LoggerFactory.getLogger(JobScheduleHelper.class);
 
 
+    /**
+     * 调度预读时间阈值：5000 毫秒
+     * 调度中心会提前 5 秒扫描数据库，将即将触发的任务捞取到内存或时间轮中
+     */
     public static final long PRE_READ_MS = 5000;    // pre read
 
     private Thread scheduleThread;
@@ -42,7 +59,7 @@ public class JobScheduleHelper {
             @Override
             public void run() {
 
-                // align time
+                // 1. 时间对齐：启动时对齐到秒刻度，保证调度精确度
                 try {
                     TimeUnit.MILLISECONDS.sleep(5000 - System.currentTimeMillis()%1000 );
                 } catch (Throwable e) {
@@ -55,30 +72,31 @@ public class JobScheduleHelper {
                 // pre-read count: treadpool-size * trigger-qps (each trigger cost 100ms, qps = 1000/100 = 100)
                 int preReadCount = (XxlJobAdminBootstrap.getInstance().getTriggerPoolFastMax() + XxlJobAdminBootstrap.getInstance().getTriggerPoolSlowMax()) * 10;
 
-                // do schedule
+                // 2. 调度主循环
                 while (!scheduleThreadToStop) {
 
-                    // param
+                    // 记录起始时间
                     long start = System.currentTimeMillis();
                     boolean preReadSuc = true;
 
                     // transaction start
                     TransactionStatus transactionStatus = XxlJobAdminBootstrap.getInstance().getTransactionManager().getTransaction(new DefaultTransactionDefinition());
                     try {
-                        // 1、job lock
+                        // 2.1 获取分布式调度锁：利用 DB 行锁 (select for update) 确保集群环境下只有一个节点扫描 DB
                         String lockedRecord = XxlJobAdminBootstrap.getInstance().getXxlJobLockMapper().scheduleLock();
                         long nowTime = System.currentTimeMillis();
 
-                        // scan and process job
+                        // 2.2 查询未来 5s 内即将触发的任务列表
                         List<XxlJobInfo> scheduleList = XxlJobAdminBootstrap.getInstance().getXxlJobInfoMapper().scheduleJobQuery(nowTime + PRE_READ_MS, preReadCount);
                         if (CollectionTool.isNotEmpty(scheduleList)) {
 
-                            // 2、push time-ring
+                            // 2.3 分类处理捞取到的任务
                             for (XxlJobInfo jobInfo: scheduleList) {
 
-                                // time-ring jump
+                                // 任务过期判定
                                 if (nowTime > jobInfo.getTriggerNextTime() + PRE_READ_MS) {
-                                    // 2.1、trigger-expire > 5s：pass && make next-trigger-time
+                                    // 场景 A：严重过期 (>5s)。
+                                    // 策略：根据 MisfireStrategy 处理（忽略或补偿一次），并重新计算下次时间
 
                                     // 1、misfire handle
                                     MisfireStrategyEnum misfireStrategyEnum = MisfireStrategyEnum.match(jobInfo.getMisfireStrategy(), MisfireStrategyEnum.DO_NOTHING);
@@ -88,7 +106,8 @@ public class JobScheduleHelper {
                                     refreshNextTriggerTime(jobInfo, new Date());
 
                                 } else if (nowTime > jobInfo.getTriggerNextTime()) {
-                                    // 2.2、trigger-expire < 5s：direct-trigger && make next-trigger-time
+                                    // 场景 B：轻微过期 (<5s)。
+                                    // 策略：立即触发一次，并重新计算下次时间
 
                                     // 1、trigger direct
                                     XxlJobAdminBootstrap.getInstance().getJobTriggerPoolHelper().trigger(jobInfo.getId(), TriggerTypeEnum.CRON, -1, null, null, null);
@@ -113,12 +132,13 @@ public class JobScheduleHelper {
                                     }
 
                                 } else {
-                                    // 2.3、trigger-pre-read：time-ring trigger && make next-trigger-time
+                                    // 场景 C：正常预读 (触发时间在未来 5s 内)
+                                    // 策略：计算刻度并塞入“时间轮 (Time-Ring)”
 
-                                    // 1、make ring second
+                                    // 1、计算任务在时间轮中的秒数刻度 (0-59秒)
                                     int ringSecond = (int)((jobInfo.getTriggerNextTime()/1000)%60);
 
-                                    // 2、push time ring
+                                    // 2、塞入内存时间轮
                                     pushTimeRing(ringSecond, jobInfo.getId());
                                     logger.debug(">>>>>>>>>>> xxl-job, schedule normal, push trigger : jobId = " + jobInfo.getId() );
 
@@ -146,11 +166,11 @@ public class JobScheduleHelper {
                         // transaction commit
                         XxlJobAdminBootstrap.getInstance().getTransactionManager().commit(transactionStatus);   // avlid schedule repeat
                     }
-                    // transaction end
+                    // 2.4 计算耗时并执行动态休眠策略
                     long cost = System.currentTimeMillis()-start;
 
 
-                    // Wait seconds, align second
+                    // 休眠对齐：若读到任务则每秒扫描，没读到则跳过本预读周期
                     if (cost < 1000) {  // scan-overtime, not wait
                         try {
                             // pre-read period: success > scan each second; fail > skip this period;
@@ -179,8 +199,9 @@ public class JobScheduleHelper {
 
                 while (!ringThreadToStop) {
 
-                    // align second
+                    // 3. 时间轮线程：每秒 tick 一次，触发内存任务
                     try {
+                        // 3.1 对齐秒刻度运行
                         TimeUnit.MILLISECONDS.sleep(1000 - System.currentTimeMillis() % 1000);
                     } catch (Throwable e) {
                         if (!ringThreadToStop) {
@@ -192,9 +213,9 @@ public class JobScheduleHelper {
                         // second data
                         List<Integer> ringItemData = new ArrayList<>();
 
-                        // collect rind data, by second
+                        // 3.2 获取当前刻度的任务数据
                         int nowSecond = Calendar.getInstance().get(Calendar.SECOND);
-                        for (int i = 0; i <= 2; i++) {                                                              // 避免调度遗漏：处理耗时太长、跨过刻度，除当前刻度外 + 向前校验2个刻度；
+                        for (int i = 0; i <= 2; i++) {                                                              // 补偿机制：多检查前 2 秒的数据，防止调度遗漏
                             List<Integer> ringItemList = ringData.remove( (nowSecond+60-i)%60 );
                             if (CollectionTool.isNotEmpty(ringItemList)) {
                                 // distinct for each second
@@ -288,11 +309,11 @@ public class JobScheduleHelper {
     }
 
     /**
-     * stop
+     * 优雅停止调度引擎
      */
     public void stop(){
 
-        // 1、stop schedule
+        // 1、停止主扫描线程
         scheduleThreadToStop = true;
         try {
             TimeUnit.SECONDS.sleep(1);  // wait
@@ -300,7 +321,7 @@ public class JobScheduleHelper {
             logger.error(e.getMessage(), e);
         }
         if (scheduleThread.getState() != Thread.State.TERMINATED){
-            // interrupt and wait
+            // 中断并等待
             scheduleThread.interrupt();
             try {
                 scheduleThread.join();
